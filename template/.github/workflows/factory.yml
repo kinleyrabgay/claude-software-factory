@@ -1,0 +1,71 @@
+name: software-factory
+
+# Runs one queued task per job. Triggers:
+#   - an issue gets the `factory` label (only people with triage access can label)
+#   - a schedule, which drains anything left in the queue
+#   - manual dispatch, optionally for one issue
+on:
+  issues:
+    types: [labeled]
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number (empty takes the oldest queued issue)
+        required: false
+
+# One run at a time. Labels are the queue, so a dropped trigger loses nothing:
+# the next scheduled run picks the issue up.
+concurrency:
+  group: software-factory
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  run:
+    if: github.event_name != 'issues' || github.event.label.name == 'factory'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # A PAT or GitHub App token makes the factory's PRs trigger your CI.
+          # With the default token, GitHub does not run workflows on them.
+          token: ${{ secrets.FACTORY_GH_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Add the toolchains your gate needs here (setup-python, setup-go, ...).
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run the factory
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN || github.token }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          git config user.name "claude-factory"
+          git config user.email "claude-factory@users.noreply.github.com"
+          if [ -n "$ISSUE" ]; then
+            .factory/bin/factory-run.sh --issue "$ISSUE"
+          else
+            .factory/bin/factory-run.sh
+          fi
+
+      - name: Keep run files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-run
+          path: .factory/state/runs.jsonl
+          if-no-files-found: ignore
